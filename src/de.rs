@@ -457,18 +457,18 @@ impl<R: Read> Deserializer<R> {
                 // Arbitrary module globals, used here for unpickling set and frozenset
                 // from protocols < 4
                 GLOBAL => {
-                    let modname = self.read_line()?;
-                    let globname = self.read_line()?;
+                    let modname = self.read_ascii_line()?;
+                    let globname = self.read_ascii_line()?;
                     let value = self.decode_global(modname, globname)?;
                     self.stack.push(value);
                 }
                 STACK_GLOBAL => {
                     let globname = match self.pop_resolve()? {
-                        Value::String(string) => string.into_bytes(),
+                        Value::String(string) => string,
                         other => return Self::stack_error("string", &other, self.pos),
                     };
                     let modname = match self.pop_resolve()? {
-                        Value::String(string) => string.into_bytes(),
+                        Value::String(string) => string,
                         other => return Self::stack_error("string", &other, self.pos),
                     };
                     let value = self.decode_global(modname, globname)?;
@@ -684,6 +684,10 @@ impl<R: Read> Deserializer<R> {
             }
             Err(err) => Err(Error::Io(err)),
         }
+    }
+
+    fn read_ascii_line(&mut self) -> Result<String> {
+        String::from_utf8(self.read_line()?).or_else(|_| self.error(ErrorCode::StringNotUTF8))
     }
 
     #[inline]
@@ -985,17 +989,15 @@ impl<R: Read> Deserializer<R> {
     }
 
     // Push the Value::Global referenced by modname and globname.
-    fn decode_global(&mut self, modname: Vec<u8>, globname: Vec<u8>) -> Result<Value> {
+    fn decode_global(&mut self, modname: String, globname: String) -> Result<Value> {
         let value = match (&*modname, &*globname) {
-            (b"_codecs", b"encode") => Value::Global(Global::Encode),
-            (b"copy_reg", b"_reconstructor") | (b"copyreg", b"_reconstructor") => {
-                Value::Global(Global::Reconst)
-            }
-            (b"__builtin__", b"set") | (b"builtins", b"set") => Value::Global(Global::Set),
-            (b"__builtin__", b"frozenset") | (b"builtins", b"frozenset") => Value::Global(Global::Frozenset),
-            (b"__builtin__", b"list") | (b"builtins", b"list") => Value::Global(Global::List),
-            (b"__builtin__", b"bytearray") | (b"builtins", b"bytearray") => Value::Global(Global::Bytearray),
-            (b"__builtin__", b"int") | (b"builtins", b"int") => Value::Global(Global::Int),
+            ("_codecs", "encode") => Value::Global(Global::Encode),
+            ("copy_reg", "_reconstructor") | ("copyreg", "_reconstructor") => Value::Global(Global::Reconst),
+            ("__builtin__", "set") | ("builtins", "set") => Value::Global(Global::Set),
+            ("__builtin__", "frozenset") | ("builtins", "frozenset") => Value::Global(Global::Frozenset),
+            ("__builtin__", "list") | ("builtins", "list") => Value::Global(Global::List),
+            ("__builtin__", "bytearray") | ("builtins", "bytearray") => Value::Global(Global::Bytearray),
+            ("__builtin__", "int") | ("builtins", "int") => Value::Global(Global::Int),
             _ => Value::Global(Global::Other),
         };
         Ok(value)
