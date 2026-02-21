@@ -34,14 +34,14 @@ type MemoId = u32;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Global {
-    Set,       // builtins/__builtin__.set
-    Frozenset, // builtins/__builtin__.frozenset
-    Bytearray, // builtins/__builtin__.bytearray
-    List,      // builtins/__builtin__.list
-    Int,       // builtins/__builtin__.int
-    Encode,    // _codecs.encode
-    Reconst,   // copy_reg._reconstructor
-    Other,     // anything else (may be a classobj that is later discarded)
+    Set,                  // builtins/__builtin__.set
+    Frozenset,            // builtins/__builtin__.frozenset
+    Bytearray,            // builtins/__builtin__.bytearray
+    List,                 // builtins/__builtin__.list
+    Int,                  // builtins/__builtin__.int
+    Encode,               // _codecs.encode
+    Reconst,              // copy_reg._reconstructor
+    Other(value::Global), // anything else
 }
 
 /// Our intermediate representation of a value.
@@ -69,6 +69,7 @@ enum Value {
     Set(Vec<Value>),
     FrozenSet(Vec<Value>),
     Dict(Vec<(Value, Value)>),
+    Call(value::Global, Vec<Value>, Vec<Value>),
 }
 
 /// Options for deserializing.
@@ -533,9 +534,17 @@ impl<R: Read> Deserializer<R> {
                     // The top-of-stack for BUILD is used either as the instance __dict__,
                     // or an argument for __setstate__, in which case it can be *any* type
                     // of object.  In both cases, we just replace the standin.
-                    let state = self.pop()?;
-                    self.pop()?; // remove the object standin
-                    self.stack.push(state);
+                    let state = self.pop_resolve()?;
+
+                    if let Value::Call(name, args, _) = self.pop_resolve()? {
+                        let state = match state {
+                            Value::Tuple(value) => value,
+                            _ => vec![],
+                        };
+                        self.stack.push(Value::Call(name, args, state));
+                    } else {
+                        self.stack.push(state);
+                    }
                 }
 
                 // Unsupported opcodes
@@ -998,7 +1007,7 @@ impl<R: Read> Deserializer<R> {
             ("__builtin__", "list") | ("builtins", "list") => Value::Global(Global::List),
             ("__builtin__", "bytearray") | ("builtins", "bytearray") => Value::Global(Global::Bytearray),
             ("__builtin__", "int") | ("builtins", "int") => Value::Global(Global::Int),
-            _ => Value::Global(Global::Other),
+            _ => Value::Global(Global::Other(value::Global { modname, globname })),
         };
         Ok(value)
     }
@@ -1085,7 +1094,7 @@ impl<R: Read> Deserializer<R> {
                 }
                 Ok(())
             }
-            Value::Global(Global::Other) => {
+            Value::Global(Global::Other(global)) => {
                 // Anything else; just keep it on the stack as an opaque object.
                 // If it is a class object, it will get replaced later when the
                 // class is instantiated.
@@ -1093,7 +1102,8 @@ impl<R: Read> Deserializer<R> {
                     let result: Result<_> = argtuple.into_iter().map(|v| self.resolve(v)).collect();
                     self.stack.push(Value::Tuple(result?));
                 } else {
-                    self.stack.push(Value::Global(Global::Other));
+                    let args: Result<_> = argtuple.into_iter().map(|v| self.resolve(v)).collect();
+                    self.stack.push(Value::Call(global, args?, vec![]));
                 }
                 Ok(())
             }
@@ -1159,12 +1169,12 @@ impl<R: Read> Deserializer<R> {
             Value::MemoRef(memo_id) => {
                 self.resolve_recursive(memo_id, (), |slf, (), value| slf.convert_value(value))
             }
-            Value::Global(_) => {
-                if self.options.replace_unresolved_globals {
-                    Ok(value::Value::None)
-                } else {
-                    Err(Error::Syntax(ErrorCode::UnresolvedGlobal))
-                }
+            Value::Global(Global::Other(global)) => Ok(value::Value::Global(global)),
+            Value::Global(_) => unreachable!("All other Global are only used internaly"),
+            Value::Call(global, args, state) => {
+                let args = args.into_iter().map(|v| self.convert_value(v)).collect::<Result<_>>()?;
+                let state = state.into_iter().map(|v| self.convert_value(v)).collect::<Result<_>>()?;
+                Ok(value::Value::Call(global, args, state))
             }
         }
     }
@@ -1205,7 +1215,7 @@ impl<'de: 'a, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
                 slf.value = Some(value);
                 slf.deserialize_any(visitor)
             }),
-            Value::Global(_) => {
+            Value::Call(..) | Value::Global(_) => {
                 if self.options.replace_unresolved_globals {
                     visitor.visit_unit()
                 } else {
